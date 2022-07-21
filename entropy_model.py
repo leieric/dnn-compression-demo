@@ -140,10 +140,10 @@ class EntropyBottleneck(nn.Module):
         return outputs, likelihood
 
     def _pmf_to_cdf(self, pmf):
-        cdf = pmf.cumsum(dim=-1)
-        spatial_dimensions = pmf.shape[:-1] + (1,)
+        cdf = pmf.cumsum(dim=0)
+        spatial_dimensions = (1, pmf.shape[1], pmf.shape[2], pmf.shape[3])#pmf.shape[1:].unsqueeze(0)
         zeros = torch.zeros(spatial_dimensions, dtype=pmf.dtype, device=pmf.device)
-        cdf_with_0 = torch.cat([zeros, cdf], dim=-1)
+        cdf_with_0 = torch.cat([zeros, cdf], dim=0)
         cdf_with_0 = cdf_with_0.clamp(max=1.)
 
         return cdf_with_0
@@ -156,7 +156,8 @@ class EntropyBottleneck(nn.Module):
         min_v = values.min().detach().float()
         max_v = values.max().detach().float()
         symbols = torch.arange(min_v, max_v+1)
-        symbols = symbols.reshape(-1,1).repeat(1, values.shape[-1])# (num_symbols, channels)
+        symbols = symbols.reshape(-1, 1, 1, 1).repeat(values.shape[0], values.shape[1], values.shape[2], values.shape[3])# (num_symbols, channels)
+
         # get normalized values
         values_norm = values - min_v
         min_v, max_v = torch.tensor([min_v]), torch.tensor([max_v])
@@ -165,30 +166,29 @@ class EntropyBottleneck(nn.Module):
         # get pmf
         pmf = self._likelihood(symbols)
         pmf = torch.clamp(pmf, min=self._likelihood_bound)
-        pmf = pmf.permute(1,0)# (channels, num_symbols)
 
         # get cdf
         cdf = self._pmf_to_cdf(pmf)
         # arithmetic encoding
-        out_cdf = cdf.unsqueeze(0).repeat(values_norm.shape[0], 1, 1).detach().cpu()
+        out_cdf = cdf.permute(1,2,3,0).unsqueeze(0).repeat(values_norm.shape[0], 1, 1, 1, 1).detach().cpu()
         strings = torchac.encode_float_cdf(out_cdf, values_norm.cpu(), check_input_bounds=True)
 
         return strings, min_v.cpu().numpy(), max_v.cpu().numpy()
 
     @torch.no_grad()
-    def decompress(self, strings, min_v, max_v, shape, channels):
+    def decompress(self, strings, min_v, max_v, latent_shape):
         # get symbols
         symbols = torch.arange(min_v, max_v+1)
-        symbols = symbols.reshape(-1,1).repeat(1, channels)
+        symbols = symbols.reshape(-1, 1, 1, 1).repeat(latent_shape[0], latent_shape[1], latent_shape[2], latent_shape[3])
 
         # get pmf
         pmf = self._likelihood(symbols)
         pmf = torch.clamp(pmf, min=self._likelihood_bound)
-        pmf = pmf.permute(1,0)
+        # pmf = pmf.permute(1,0, 2, 3)
         # get cdf
         cdf = self._pmf_to_cdf(pmf)
         # arithmetic decoding
-        out_cdf = cdf.unsqueeze(0).repeat(shape[0], 1, 1).detach().cpu()
+        out_cdf = cdf.permute(1,2,3,0).unsqueeze(0).repeat(latent_shape[0], 1, 1, 1, 1).detach().cpu()
         values = torchac.decode_float_cdf(out_cdf, strings)
         values = values.float()
         values += min_v
